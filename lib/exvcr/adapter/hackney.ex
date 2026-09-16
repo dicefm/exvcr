@@ -95,13 +95,22 @@ defmodule ExVCR.Adapter.Hackney do
   def hook_response_from_cache(_request, %ExVCR.Response{type: "error"} = response), do: response
   def hook_response_from_cache(_request, %ExVCR.Response{body: nil} = response), do: response
   def hook_response_from_cache([_, _, _, _, opts], %ExVCR.Response{body: body} = response) do
-    if :with_body in opts || {:with_body, true} in opts do
+    if :with_body in opts || {:with_body, true} in opts || hackney_defaults_to_body?() do
       response
     else
       client          = make_ref()
       client_key_atom = client |> inspect |> String.to_atom
       Store.set(client_key_atom, body)
       %{response | body: client}
+    end
+  end
+
+  # hackney >= 4.0 returns the body inline by default (no :with_body needed);
+  # hackney 1.x requires opting in via :with_body or it streams a client ref.
+  defp hackney_defaults_to_body? do
+    case Application.spec(:hackney, :vsn) do
+      nil -> false
+      vsn -> Version.match?(List.to_string(vsn), ">= 4.0.0")
     end
   end
 
