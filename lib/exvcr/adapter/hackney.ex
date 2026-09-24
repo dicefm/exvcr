@@ -7,6 +7,8 @@ defmodule ExVCR.Adapter.Hackney do
   alias ExVCR.Adapter.Hackney.Store
   alias ExVCR.Util
 
+  require Logger
+
   defmacro __using__(_opts) do
     quote do
       Store.start()
@@ -95,7 +97,26 @@ defmodule ExVCR.Adapter.Hackney do
   def hook_response_from_cache(_request, %ExVCR.Response{type: "error"} = response), do: response
   def hook_response_from_cache(_request, %ExVCR.Response{body: nil} = response), do: response
 
-  def hook_response_from_cache([_, _, _, _, opts], %ExVCR.Response{body: body} = response) do
+  def hook_response_from_cache(request, response) do
+    hook_response_from_cache(request, response, hackney_version())
+  end
+
+  @doc """
+  Same as hook_response_from_cache/2 but with hackney version passed in so we
+  can unit test without having to load different versions of hackney.
+  """
+  def hook_response_from_cache([_, _, _, _, opts], response, version) do
+    if Version.match?(version, ">= 3.0.0") do
+      response
+    else
+      warn_old_hackney(version)
+      check_with_body_option(opts, response)
+    end
+  end
+
+  # hackney < 3.0 returns the body inline only when :with_body is passed. Otherwise
+  # it returns a reference whose body is read later with :hackney.body/1.
+  defp check_with_body_option(opts, %ExVCR.Response{body: body} = response) do
     if :with_body in opts || {:with_body, true} in opts do
       response
     else
@@ -103,6 +124,28 @@ defmodule ExVCR.Adapter.Hackney do
       client_key_atom = client |> inspect() |> String.to_atom()
       Store.set(client_key_atom, body)
       %{response | body: client}
+    end
+  end
+
+  defp hackney_version do
+    _ = Application.load(:hackney)
+
+    :hackney
+    |> Application.spec(:vsn)
+    |> List.to_string()
+  end
+
+  @warned_key {__MODULE__, :old_hackney_warned}
+
+  # Logged once per VM rather than on every replayed request.
+  defp warn_old_hackney(version) do
+    if not :persistent_term.get(@warned_key, false) do
+      Logger.warning(
+        "ExVCR: hackney #{version} returns response bodies by reference. " <>
+          "Support for hackney < 3.0 will be removed; please upgrade hackney."
+      )
+
+      :persistent_term.put(@warned_key, true)
     end
   end
 
