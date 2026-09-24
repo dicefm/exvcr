@@ -7,6 +7,8 @@ defmodule ExVCR.Adapter.Hackney do
   alias ExVCR.Adapter.Hackney.Store
   alias ExVCR.Util
 
+  require Logger
+
   defmacro __using__(_opts) do
     quote do
       Store.start()
@@ -59,10 +61,10 @@ defmodule ExVCR.Adapter.Hackney do
   Generate key for searching response.
   """
   def generate_keys_for_request(request) do
-    url          = Enum.fetch!(request, 1)
-    method       = Enum.fetch!(request, 0)
+    url = Enum.fetch!(request, 1)
+    method = Enum.fetch!(request, 0)
     request_body = Enum.fetch(request, 3) |> parse_request_body
-    headers      = Enum.at(request, 2, []) |> Util.stringify_keys()
+    headers = Enum.at(request, 2, []) |> Util.stringify_keys()
 
     [url: url, method: method, request_body: request_body, headers: headers]
   end
@@ -94,23 +96,51 @@ defmodule ExVCR.Adapter.Hackney do
   def hook_response_from_cache(_request, nil), do: nil
   def hook_response_from_cache(_request, %ExVCR.Response{type: "error"} = response), do: response
   def hook_response_from_cache(_request, %ExVCR.Response{body: nil} = response), do: response
-  def hook_response_from_cache([_, _, _, _, opts], %ExVCR.Response{body: body} = response) do
-    if :with_body in opts || {:with_body, true} in opts || hackney_defaults_to_body?() do
+
+  # hackney >= 3.0 always returns the body inline and ignores :with_body.
+  def hook_response_from_cache([_, _, _, _, opts], response) do
+    version = hackney_version()
+
+    if Version.match?(version, ">= 3.0.0") do
       response
     else
-      client          = make_ref()
-      client_key_atom = client |> inspect |> String.to_atom
+      warn_old_hackney(version)
+      check_with_body_option(opts, response)
+    end
+  end
+
+  # hackney < 3.0 returns the body inline only when :with_body is passed. Otherwise
+  # it returns a reference whose body is read later with :hackney.body/1.
+  defp check_with_body_option(opts, %ExVCR.Response{body: body} = response) do
+    if :with_body in opts || {:with_body, true} in opts do
+      response
+    else
+      client = make_ref()
+      client_key_atom = client |> inspect |> String.to_atom()
       Store.set(client_key_atom, body)
       %{response | body: client}
     end
   end
 
-  # hackney >= 4.0 returns the body inline by default (no :with_body needed);
-  # hackney 1.x requires opting in via :with_body or it streams a client ref.
-  defp hackney_defaults_to_body? do
-    case Application.spec(:hackney, :vsn) do
-      nil -> false
-      vsn -> Version.match?(List.to_string(vsn), ">= 4.0.0")
+  defp hackney_version do
+    _ = Application.load(:hackney)
+
+    :hackney
+    |> Application.spec(:vsn)
+    |> List.to_string()
+  end
+
+  @warned_key {__MODULE__, :old_hackney_warned}
+
+  # Logged once per VM rather than on every replayed request.
+  defp warn_old_hackney(version) do
+    if not :persistent_term.get(@warned_key, false) do
+      Logger.warning(
+        "ExVCR: hackney #{version} returns response bodies by reference. " <>
+          "Support for hackney < 3.0 will be removed; please upgrade hackney."
+      )
+
+      :persistent_term.put(@warned_key, true)
     end
   end
 
@@ -128,7 +158,8 @@ defmodule ExVCR.Adapter.Hackney do
   end
 
   defp handle_body_request(recorder, [client, max_length]) do
-    client_key_atom = client |> inspect |> String.to_atom
+    client_key_atom = client |> inspect |> String.to_atom()
+
     if body = Store.get(client_key_atom) do
       Store.delete(client_key_atom)
       {:ok, body}
@@ -138,15 +169,19 @@ defmodule ExVCR.Adapter.Hackney do
           body = ExVCR.Filter.filter_sensitive_data(body)
 
           client_key_string = inspect(client)
-          ExVCR.Recorder.update(recorder,
-            fn(%{request: _request, response: response}) ->
+
+          ExVCR.Recorder.update(
+            recorder,
+            fn %{request: _request, response: response} ->
               response.body == client_key_string
             end,
-            fn(%{request: request, response: response}) ->
+            fn %{request: request, response: response} ->
               %{request: request, response: %{response | body: body}}
             end
           )
+
           {:ok, body}
+
         {ret, body} ->
           {ret, body}
       end
@@ -162,7 +197,7 @@ defmodule ExVCR.Adapter.Hackney do
     else
       case response.body do
         nil -> {:ok, response.status_code, response.headers}
-        _   -> {:ok, response.status_code, response.headers, response.body}
+        _ -> {:ok, response.status_code, response.headers, response.body}
       end
     end
   end
