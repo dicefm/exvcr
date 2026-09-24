@@ -10,10 +10,11 @@ defmodule ExVCR.Adapter.HackneyBodyTest do
   @warned_key {Hackney, :old_hackney_warned}
   @response %ExVCR.Response{type: "ok", status_code: 200, headers: [], body: "recorded body"}
 
+  # The warning is marked as already shown; the warning tests reset it themselves.
   setup do
     Store.start()
     warned = :persistent_term.get(@warned_key, false)
-    :persistent_term.erase(@warned_key)
+    :persistent_term.put(@warned_key, true)
     on_exit(fn -> :persistent_term.put(@warned_key, warned) end)
   end
 
@@ -25,6 +26,8 @@ defmodule ExVCR.Adapter.HackneyBodyTest do
       end
 
       test "does not log the upgrade warning on #{version}" do
+        :persistent_term.erase(@warned_key)
+
         assert capture_log(fn -> Hackney.hook_response_from_cache(request([]), @response, unquote(version)) end) ==
                  ""
       end
@@ -33,22 +36,20 @@ defmodule ExVCR.Adapter.HackneyBodyTest do
 
   describe "hackney < 3.0" do
     test "returns the recorded body inline when :with_body is passed" do
-      capture_log(fn ->
-        assert Hackney.hook_response_from_cache(request([:with_body]), @response, "1.23.0") == @response
-        assert Hackney.hook_response_from_cache(request(with_body: true), @response, "1.23.0") == @response
-      end)
+      assert Hackney.hook_response_from_cache(request([:with_body]), @response, "1.23.0") == @response
+      assert Hackney.hook_response_from_cache(request(with_body: true), @response, "1.23.0") == @response
     end
 
     test "returns a reference that holds the recorded body when :with_body is not passed" do
-      capture_log(fn ->
-        %ExVCR.Response{body: ref} = Hackney.hook_response_from_cache(request([]), @response, "2.0.0")
+      %ExVCR.Response{body: ref} = Hackney.hook_response_from_cache(request([]), @response, "2.0.0")
 
-        assert is_reference(ref)
-        assert Store.get(ref |> inspect() |> String.to_atom()) == "recorded body"
-      end)
+      assert is_reference(ref)
+      assert Store.get(ref |> inspect() |> String.to_atom()) == "recorded body"
     end
 
     test "logs the upgrade warning once" do
+      :persistent_term.erase(@warned_key)
+
       log =
         capture_log(fn ->
           Hackney.hook_response_from_cache(request([]), @response, "1.23.0")
